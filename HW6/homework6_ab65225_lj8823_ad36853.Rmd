@@ -1,0 +1,202 @@
+---
+title: "FinTech HW6"
+author: "Alyson Brown"
+date: "2/21/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Part 1: Credit Modeling
+```{r libs, include=FALSE, message= FALSE}
+#rm(list = ls())
+library("psych")
+library("dplyr")
+```
+
+### Q1
+
+```{r q1}
+# Q1
+load("/Users/alysonbrown/Desktop/training_10.Rda")
+load("/Users/alysonbrown/Desktop/testing_11.Rda")
+
+# Feature handling
+training_10$STATE <- as.factor(training_10$STATE)
+training_10$OCC_STAT <- as.factor(training_10$OCC_STAT)
+
+testing_11$STATE <- as.factor(testing_11$STATE)
+testing_11$OCC_STAT <- as.factor(testing_11$OCC_STAT)
+
+names(training_10)
+
+```
+
+
+### Q2
+
+```{r q2, include=FALSE, message= FALSE, warning= FALSE}
+# Q2
+describeBy(training_10[,1:25], training_10$Delq.90.days)
+
+```
+
+#### Delinquency by Various Characteristics
+
+```{r q3}
+# Q2 Bullet 1
+set1 = select(training_10, CSCORE_B, OLTV, OCLTV, DTI)
+describeBy(set1, training_10$Delq.90.days)
+
+```
+
+The delinquent group had lower average credit scores (724 vs. 768), higher average OLTVs (74 vs. 66) & average OCLTVs (75 vs. 67), and higher average DTIs (36 vs. 31).
+
+Since the difference of all variables based on the delinquency are obvious, we can guess that credit score, loan-to-value ratio, combined loan-to-value ratio, and deebt-to-income ratio are correlated with high delinquency.
+
+#### Delinquency by State
+
+```{r states}
+#summarize delinquency by states
+mytable <- table(training_10$STATE, training_10$Delq.90.days)
+z = prop.table(mytable, 1) # row percentages 
+
+```
+
+We can see that VI has the highest delinquency which is 0.031128405 and GU has lowest delinquency which is 0. It is interesing to note that the two "states" with significantly higher delinquency than the others are Puerto Rico and the Virgin Islands.
+
+```{r statePlot}
+library(usmap)
+library(ggplot2)
+
+z = z[-12,]
+z = z[-40,]
+z = z[-47,] #12, 41, 49
+
+statepop$del = z[,2]*100
+
+plot_usmap(data = statepop, values = "del", lines = "red") + 
+  scale_fill_continuous(name = "% Delinquent", label = scales::comma) + 
+  theme(legend.position = "right")+ 
+  labs(title = "Delinquency By State", subtitle = "Values shown in % - PR, VI, GU not shown") +
+  theme(legend.position = "right")
+
+```
+
+#### Delinquency by Month
+
+```{r month}
+#summarize delinquency by month
+mytable2 <- table(training_10$ORIG_DTE, training_10$Delq.90.days)
+prop.table(mytable2, 1) # row percentages 
+```
+
+We can see that January, May and February are the first months with highest delinquent. January is the highest month.
+
+### Baseline Logit Model:
+
+```{r baseline}
+#Q3
+fit <- glm(Delq.90.days~ ORIG_RT, data=training_10, family = binomial)
+summary(fit)
+
+fit_preds = predict(fit, newdata = testing_11)
+
+```
+
+### Better Logit Model:
+
+CSCORE B, OLT V , OCLT V , DTI, OCC STAT, and STATE, but without the interest rate (ORIG RT)
+
+
+```{r q4}
+#Q4
+set2 = select(training_10, CSCORE_B, OLTV, OCLTV, OCC_STAT, DTI, STATE, Delq.90.days)
+set3 = select(testing_11, CSCORE_B, OLTV, OCLTV, OCC_STAT, DTI, STATE, Delq.90.days)
+# Remove NAs
+training_set = set2[complete.cases(set2),]
+testing_set = set3[complete.cases(set3),]
+
+fit2 <- glm(Delq.90.days~ CSCORE_B + OLTV + OCLTV + DTI + OCC_STAT + STATE, data=training_set, family = binomial)
+summary(fit2)
+
+fit2_preds = predict(fit2, newdata = testing_11)
+
+```
+
+### Random Forest Model (using h2o):
+
+```{r RF, message= FALSE, warning= FALSE}
+library(h2o)
+
+## Create an H2O cloud 
+h2o.init(nthreads=-1,            ## -1: use all available threads
+  max_mem_size = "2G")    ## specify the memory size for the H2O cloud
+h2o.removeAll() # Clean slate - just in case the cluster was already running
+
+
+y='Delq.90.days'
+x=c('CSCORE_B','OLTV','OCLTV','DTI','OCC_STAT','STATE')
+
+df <- as.h2o(training_10)
+test_set <- as.h2o(testing_11)
+splits = h2o.splitFrame(df, 0.8)
+train = splits[[1]]
+valid = splits[[2]]
+
+## Random Forest Model
+rf1 <- h2o.randomForest(training_frame = train, validation_frame = valid, x=x, y=y, model_id = "rf_1", ntrees = 200, stopping_rounds = 2, score_each_iteration = T, seed = 1000000)
+summary(rf1)
+
+finalRf_predictions<-h2o.predict(object = rf1, newdata = test_set)
+head(finalRf_predictions)
+
+```
+
+### Neural Network Model
+
+```{r NN, message= FALSE, warning= FALSE}
+h2o.no_progress()  # Disable progress bars for Rmd
+
+train_set <- as.h2o(training_10)
+dl_fit1 <- h2o.deeplearning(x = x, y = y, training_frame = train_set,model_id = "dl_fit1", hidden = c(20,20), seed = 1)
+nn_preds <- h2o.predict(object = dl_fit1, newdata = test_set)
+levels(test_set$Delq.90.days)
+
+```
+
+### ROC Curve
+
+```{r ROC, message= FALSE, warning= FALSE}
+library(pROC)
+testing_11$Delq.90.days <- as.numeric(testing_11$Delq.90.days)
+
+roc_benchmark = roc(testing_11$Delq.90.days, fit_preds)
+roc_logistic = roc(testing_11$Delq.90.days, fit2_preds)
+roc_rf = roc(testing_11$Delq.90.days, as.matrix(finalRf_predictions))
+roc_nn = roc(testing_11$Delq.90.days, as.matrix(nn_preds))
+plot(roc_benchmark, col = "black", lty = 3, main = "ROC", xlim = c(1.0,0), ylim = c(0,1.0))
+plot(roc_logistic, col = "green", lty = 3, xlim = c(1.0,0), add = TRUE)
+plot(roc_rf, col = "blue", lty = 3, xlim = c(1.0,0), add = TRUE)
+plot(roc_nn, col = "red", lty = 3, xlim = c(1.0,0), add = TRUE)
+```
+
+
+In the code, comment on the results of the ROC curve comparison. Which model seems to be the best out of sample? Can you provide an explanation of the observed differences?
+
+
+Logistic Regression with many features is the best model in this case based on the ROC curve. It is closely followed by the deep learning neural net model. The random forest and baseline logit model both performed relatively poorly. There are many possible reasons that a logit model would produce more accurate results than other models, such as overfitting or in the case of the baseline logit model, not enough information. It's also possible that decision trees were not able to find good splits on the differenct features. 
+
+![I am thinking of this slide](/Users/alysonbrown/Desktop/TreeSlide.png)
+
+Another important factor to consider is that the data is highly imbalanced, with about 99% of the data from non-delinquent loans. While this is probably representative of the real world, it is is tougher to accurately classify a loan as delinquent, when there is such a high prior probability (99%) that the loan is not delinquent. (If unfamiliar with prior probabilities, it essentially encapulates the idea that, with no outside knowledge about a loan, there's a 99% chance it's not delinquent simply based on the historical data, and would therefore require very compelling evidence that it strongly resembles a delinquent loan of the past - of which there is little data to begin with.) 
+
+Imbalanced data such as this makes classification in any model difficult, but it would especially be a challenge for decision trees, as trees are looking for splits in the features that have allow for grouping a set of loans as delinquent or not - which is tough when so few are actually delinquent relative to the whole population. Logistic regression, however, looks at the entire set of features together, and tries to find the most similar loans in the historical data. It calculates similarity scores, then probabilities, and then chooses some cutoff for the probability for which it classifies a loan as delinquent, meaning that you could adjust such a cutoff to account for the overwhelming prior pobability that a loan is not delinquent - which is another reason that logistic regression (with enough information/features is the best model in this case.)
+
+I believe that the deep learning model was second place was because it would not have the same previously mentioned issues of decision trees/random forests, but would possibly overfit the training data since kernels within the neural net are going over the data many times and constantly updating the beta coefficients for prediction. Such a model could possibly over-complicate the solution and overfit the training data. 
+
+
+
+
